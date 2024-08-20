@@ -19,135 +19,161 @@ public partial class MainWindow : Window
 {
     private const int CELL_WIDTH = 24;
     private const int CELL_HEIGHT = 18;
+    private const int WH_KEYBOARD_LL = 13;
+    private const int WM_KEYUP = 0x0101;
+    private const int WM_SYSKEYUP  = 0x0105;
 
-    private int _currentLanguageId;
-    private static IntPtr _hookID = IntPtr.Zero;
-    private LowLevelKeyboardProc _proc;
-    private DispatcherTimer _hideTimer;
+    private static IntPtr _hookId = IntPtr.Zero;
     
+    private readonly DispatcherTimer _hideTimer;
+
     private List<MyGridItem> _gridItems;
+    private LowLevelKeyboardProc _proc;
+    private int _currentLanguageId;
+
+    private NotifyIcon _notifyIcon;
+    
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetKeyboardLayout(uint idThread);
+
+    [DllImport("kernel32.dll")]
+    private static extern uint GetCurrentThreadId();
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
     
     public MainWindow()
     {
         InitializeComponent();
 
-        this.Topmost = true;
+        this.ShowInTaskbar = false;
+        Topmost = true;
         CreatePopupWindow();
-        InputLanguageManager.Current.InputLanguageChanged += OnInputLanguageChanged;
+        InitializeNotifyIcon();
         UpdateActiveLanguageView();
-        
-        Loaded += MainWindow_Loaded;
-        Closed += MainWindow_Closed;
         
         _hideTimer = new DispatcherTimer();
         _hideTimer.Interval = TimeSpan.FromSeconds(2);
         _hideTimer.Tick += HideTimer_Tick;
         
-        //this.Hide();
-        //_hideTimer.Stop();
+        Loaded += MainWindow_Loaded;
+        Closed += MainWindow_Closed;
+        InputLanguageManager.Current.InputLanguageChanged += OnInputLanguageChanged;
+    }
+
+    private void InitializeNotifyIcon()
+    {
+        _notifyIcon = new NotifyIcon();
+        _notifyIcon.Icon = SystemIcons.Application;
+        _notifyIcon.Visible = true;
+        _notifyIcon.Text = "Language Bar";
+
+        // Створюємо контекстне меню для іконки в треї
+        var contextMenu = new System.Windows.Forms.ContextMenuStrip();
+        var exitMenuItem = new System.Windows.Forms.ToolStripMenuItem("Exit", null, OnExitClick);
+        contextMenu.Items.Add(exitMenuItem);
+
+        _notifyIcon.ContextMenuStrip = contextMenu;
+    }
+
+    private void OnExitClick(object sender, EventArgs e)
+    {
+        _notifyIcon.Visible = false;
+        _notifyIcon.Dispose();
+        Application.Current.Shutdown();
+    }
+
+    protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
+    {
+        base.OnClosing(e);
+        _notifyIcon.Dispose();
     }
     
     
-        private void MainWindow_Loaded(object sender, RoutedEventArgs e)
-        {
-            _currentLanguageId = GetKeyboardLayout(GetCurrentThreadId()).ToInt32()  & 0xFFFF;
-            _proc = HookCallback;
-            _hookID = SetHook(_proc);
+    
+    
+    
+    
+    
+    
+    
+    private void MainWindow_Loaded(object sender, RoutedEventArgs e)
+    {
+        _currentLanguageId = GetKeyboardLayout(GetCurrentThreadId()).ToInt32()  & 0xFFFF;
+        _proc = HookCallback;
+        _hookId = SetHook(_proc);
             
-            this.Hide();
-        }
+        this.Hide();
+    }
 
-        private void MainWindow_Closed(object sender, EventArgs e)
-        {
-            UnhookWindowsHookEx(_hookID);
-        }
+    private void MainWindow_Closed(object sender, EventArgs e)
+    {
+        UnhookWindowsHookEx(_hookId);
+    }
 
-        private IntPtr SetHook(LowLevelKeyboardProc proc)
+    private IntPtr SetHook(LowLevelKeyboardProc proc)
+    {
+        using (var curProcess = Process.GetCurrentProcess())
+        using (var curModule = curProcess.MainModule)
         {
-            using (var curProcess = Process.GetCurrentProcess())
-            using (var curModule = curProcess.MainModule)
+            return SetWindowsHookEx(WH_KEYBOARD_LL, proc,
+                GetModuleHandle(curModule.ModuleName), 0);
+        }
+    }
+
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+    {
+        if (nCode >= 0 && (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP))
+        {
+            IntPtr foregroundWindow = GetForegroundWindow();
+            uint foregroundThreadId = GetWindowThreadProcessId(foregroundWindow, IntPtr.Zero);
+            int languageId = GetKeyboardLayout(foregroundThreadId).ToInt32() & 0xFFFF;
+
+            if (_currentLanguageId != languageId)
             {
-                return SetWindowsHookEx(WH_KEYBOARD_LL, proc,
-                    GetModuleHandle(curModule.ModuleName), 0);
-            }
-        }
-
-        private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
-
-        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
-        {
-            if (nCode >= 0 && (wParam == (IntPtr)WM_KEYUP || wParam == (IntPtr)WM_SYSKEYUP))
-            {
-                IntPtr foregroundWindow = GetForegroundWindow();
-                uint foregroundThreadId = GetWindowThreadProcessId(foregroundWindow, IntPtr.Zero);
-                int languageId = GetKeyboardLayout(foregroundThreadId).ToInt32() & 0xFFFF;
-
-                if (_currentLanguageId != languageId)
-                {
-                    _currentLanguageId = languageId;
+                _currentLanguageId = languageId;
                     
-                    Application.Current.Dispatcher.Invoke(ShowPopupWindow);
-                }
-                
-               
+                Application.Current.Dispatcher.Invoke(ShowPopupWindow);
             }
-
-            return CallNextHookEx(_hookID, nCode, wParam, lParam);
         }
 
-        #region WinAPI imports
+        return CallNextHookEx(_hookId, nCode, wParam, lParam);
+    }
 
-        private const int WH_KEYBOARD_LL = 13;
-        private const int WM_KEYUP = 0x0101;
-        private const int WM_SYSKEYUP  = 0x0105;
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetKeyboardLayout(uint idThread);
-
-        [DllImport("kernel32.dll")]
-        private static extern uint GetCurrentThreadId();
-
-        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr GetModuleHandle(string lpModuleName);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr GetForegroundWindow();
-
-        [DllImport("user32.dll")]
-        private static extern uint GetWindowThreadProcessId(IntPtr hWnd, IntPtr lpdwProcessId);
-
-        
-        #endregion
-    
-    
-    
-        private void ShowPopupWindow()
-        {
-            this.Show();
-            UpdateActiveLanguageView();
-            UpdateWindowPos();
+    private void ShowPopupWindow()
+    {
+        this.Show();
+        UpdateActiveLanguageView();
+        UpdateWindowPos();
             
-            _hideTimer.Stop();
-            _hideTimer.Start();
-        }
-    
-        private void HideTimer_Tick(object sender, EventArgs e)
-        {
-            this.Hide();
-            _hideTimer.Stop();
-        }
-        
-    
+        _hideTimer.Stop();
+        _hideTimer.Start();
+    }
+
+    private void HideTimer_Tick(object sender, EventArgs e)
+    {
+        this.Hide();
+        _hideTimer.Stop();
+    }
+
     private void CreatePopupWindow()
     {
         List<string> inputLanguages = InputLanguageManager.Current.AvailableInputLanguages
@@ -224,7 +250,7 @@ public partial class MainWindow : Window
         border.BorderBrush = Brushes.White;
         return border;
     }
-    
+
     private static TextBox CreateTextBox(string text)
     {
         TextBox textBox= new TextBox();
@@ -252,8 +278,8 @@ public partial class MainWindow : Window
     private void UpdateWindowPos()
     {
         Vector2 point = GetMousePosition();
-        this.Left = point.X - this.Width / 2;
-        this.Top = point.Y + 10;
+        Left = point.X - Width / 2;
+        Top = point.Y + 10;
     }
 
     private static Vector2 GetMousePosition()
